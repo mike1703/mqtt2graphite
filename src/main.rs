@@ -137,7 +137,6 @@ fn main() -> Result<()> {
             Ok(rumqttc::Event::Incoming(rumqttc::Packet::Publish(publish))) => {
                 if let Some(value) = process_payload(&publish.payload) {
                     let topic_path = PathBuf::from(publish.topic.strip_suffix("/state").unwrap_or(&publish.topic));
-                    dbg!(&topic_path, &subscribed_topic_path);
                     let clean_path = topic_path.strip_prefix(&subscribed_topic_path).unwrap();
 
                     let mut metric_path = clean_path
