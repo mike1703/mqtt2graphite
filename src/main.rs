@@ -35,9 +35,15 @@ struct GraphiteConfig {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+struct MappingsConfig {
+    prefixes: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
 struct Config {
     mqtt: MqttConfig,
     graphite: GraphiteConfig,
+    mappings: Option<MappingsConfig>,
 }
 
 fn resolve_address(address: &str) -> anyhow::Result<SocketAddr> {
@@ -96,16 +102,23 @@ fn main() -> Result<()> {
     let mut graphite_client = create_graphite_client(&config.graphite)
         .map_err(|e| anyhow::anyhow!("Failed to create Graphite client: {}", e))?;
 
-    let mut mqtt_options = MqttOptions::new(config.mqtt.client_id.clone(), config.mqtt.host.clone(), config.mqtt.port);
-    if let (Some(username), Some(password)) = (config.mqtt.username.clone(), config.mqtt.password.clone()) {
+    let mut mqtt_options = MqttOptions::new(
+        config.mqtt.client_id.clone(),
+        config.mqtt.host.clone(),
+        config.mqtt.port,
+    );
+    if let (Some(username), Some(password)) =
+        (config.mqtt.username.clone(), config.mqtt.password.clone())
+    {
         mqtt_options.set_credentials(username, password);
     }
     mqtt_options.set_keep_alive(Duration::from_secs(5));
 
-    let (mut client, mut connection) = Client::new(mqtt_options, 10);
-    
+    let (client, mut connection) = Client::new(mqtt_options, 10);
+
     // Subscribe on connect/reconnect
-    let topic = config.mqtt.topic.clone();
+    let subscribed_topic_path = PathBuf::from(&config.mqtt.topic);
+    let topic = format!("{}/#", config.mqtt.topic);
     client.subscribe(topic.clone(), QoS::AtMostOnce)?;
 
     info!("Waiting for MQTT connection...");
@@ -123,8 +136,38 @@ fn main() -> Result<()> {
             }
             Ok(rumqttc::Event::Incoming(rumqttc::Packet::Publish(publish))) => {
                 if let Some(value) = process_payload(&publish.payload) {
-                    let metric_name =
-                        format!("{}.{}", config.graphite.prefix, publish.topic.replace('/', "."));
+                    let topic_path = PathBuf::from(publish.topic.strip_suffix("/state").unwrap_or(&publish.topic));
+                    dbg!(&topic_path, &subscribed_topic_path);
+                    let clean_path = topic_path.strip_prefix(&subscribed_topic_path).unwrap();
+
+                    let mut metric_path = clean_path
+                        .components()
+                        .map(|c| c.as_os_str().to_string_lossy().to_string())
+                        .collect::<Vec<_>>();
+
+                    if let Some(last_part) = metric_path.last_mut() {
+                        if let Some(mappings) = &config.mappings {
+                            if let Some(prefixes) = &mappings.prefixes {
+                                for prefix in prefixes {
+                                    let prefix_with_underscore = format!("{}_", prefix);
+                                    if last_part.starts_with(&prefix_with_underscore) {
+                                        *last_part = last_part.replacen(
+                                            &prefix_with_underscore,
+                                            &format!("{}.", prefix),
+                                            1,
+                                        );
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    let metric_name = format!(
+                        "{}.{}",
+                        config.graphite.prefix,
+                        metric_path.join(".")
+                    );
                     let message = GraphiteMessage::new(&metric_name, &value.to_string());
                     if let Err(e) = graphite_client.send_message(&message) {
                         error!("failed to send metric to graphite: {}", e);
