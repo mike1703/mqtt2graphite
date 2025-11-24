@@ -1,0 +1,13 @@
+[Unit]
+Description=MQTT to Graphite Bridge
+After=network.target
+
+[Service]
+ExecStart=/home/michael/.cargo/bin/mqtt2graphite --config <path/to/config.toml>
+Restart=on-failure
+RestartSec=5s
+StartLimitInterval=60s
+StartLimitBurst=5
+
+[Install]
+WantedBy=multi-user.target
